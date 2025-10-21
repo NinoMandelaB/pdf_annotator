@@ -62,7 +62,7 @@ pdf-link-annotator/
 │   ├── main.tf
 │   ├── variables.tf
 │   ├── outputs.tf
-│   └── README.md   # Azure deployment instructions
+│   └── AzureInstallation.md   # Azure deployment instructions
 └── README.md       # This file
 
 ## Configuration
