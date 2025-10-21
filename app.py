@@ -94,19 +94,18 @@ def index():
 def annotate_pdf_with_links(input_pdf, output_pdf):
     """
     Processes a PDF file to annotate all links with red boxes and text boxes.
-    Args:
-        input_pdf (str): Path to the input PDF file
-        output_pdf (str): Path to save the annotated PDF file
+    Strictly follows the sequence:
+    1. Add margin to the document
+    2. Collect all link information (positions, URLs)
+    3. Add red boxes around links
+    4. Add textboxes in the margin with full URLs
     """
-    # Open the input PDF document
+    # Step 1: Add margin to the document
     doc = fitz.open(input_pdf)
-
-    # Define margin width for URLs (120 points for better readability)
-    margin_width = 120
+    margin_width = 150  # Define margin width
 
     # First pass: expand all pages to include margin
     for page in doc:
-        # Get current page dimensions
         page_rect = page.rect
         original_width = page_rect.width
         original_height = page_rect.height
@@ -119,124 +118,183 @@ def annotate_pdf_with_links(input_pdf, output_pdf):
         page.set_mediabox(new_rect)
         page.set_cropbox(new_rect)
 
-    # Regular expression pattern to match URLs and email addresses
+    # Step 2: Collect all link information (positions, URLs)
+    all_links = []
     url_pattern = re.compile(
-        r'(?:[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}|'  # Emails: user@domain.com
-        r'(?:https?://|www\.)[^\s]+)',                        # HTTP/HTTPS or www URLs
-        re.IGNORECASE  # Case-insensitive matching
+        r'(?:[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}|'  # Emails
+        r'(?:https?://|www\.)[^\s,;)|]+|'                      # HTTP/HTTPS or www URLs
+        r'[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/[^\s,;)|]+|'            # Domain paths
+        r'[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})',                      # Domains
+        re.IGNORECASE
     )
 
-    # List to store all links found in the document
-    all_links = []
-
-    # Second pass: find all links (now that pages are expanded)
+    # Collect all links first without modifying the document
     for page in doc:
-        # --- Process explicit links (clickable links) ---
-        links = page.get_links()  # Get all links on the page
+        # Process explicit links (clickable links)
+        links = page.get_links()
         for link in links:
-            if "uri" in link:  # Check if the link has a URI
-                rect = fitz.Rect(link["from"])  # Get the link's rectangle coordinates
-                all_links.append({"page": page, "rect": rect, "url": link["uri"], "type": "explicit"})
+            if "uri" in link:
+                rect = fitz.Rect(link["from"])
+                all_links.append({
+                    "page": page,
+                    "rect": rect,
+                    "url": link["uri"],
+                    "type": "explicit"
+                })
 
-        # --- Process plain text URLs (non-clickable text that looks like a URL) ---
-        blocks = page.get_text("dict")["blocks"]  # Get all text blocks on the page
+        # Process plain text URLs
+        blocks = page.get_text("dict")["blocks"]
         for block in blocks:
-            if "lines" in block:  # Check if the block contains text lines
+            if "lines" in block:
                 for line in block["lines"]:
+                    line_text = ""
+                    line_spans = []
+
+                    # Collect all spans in this line
                     for span in line["spans"]:
+                        line_text += span["text"]
+                        line_spans.append(span)
+
+                    # Find URL matches in this line's text
+                    matches = list(url_pattern.finditer(line_text))
+                    if not matches:
+                        continue
+
+                    # Calculate character positions for URL detection
+                    char_positions = []
+                    for span in line_spans:
                         text = span["text"]
-                        matches = list(url_pattern.finditer(text))  # Find all URL matches in the text
-                        if not matches:  # Skip if no URLs found
+                        if not text:
                             continue
 
-                        # Calculate the width of each character in the span
                         char_width = (span["bbox"][2] - span["bbox"][0]) / len(text) if len(text) > 0 else 0
-                        for match in matches:
-                            url = match.group()  # Get the matched URL text
-                            start_idx = match.start()  # Start position of the URL in the text
-                            end_idx = match.end()  # End position of the URL in the text
+                        for i, char in enumerate(text):
+                            char_x0 = span["bbox"][0] + i * char_width
+                            char_x1 = span["bbox"][0] + (i + 1) * char_width
+                            char_y0 = span["bbox"][1]
+                            char_y1 = span["bbox"][3]
+                            char_positions.append({
+                                "char": char,
+                                "rect": fitz.Rect(char_x0, char_y0, char_x1, char_y1),
+                                "text_pos": len(line_text) - len(text) + i
+                            })
 
-                            # Calculate the exact bounding box for the URL text
-                            url_x0 = span["bbox"][0] + start_idx * char_width
-                            url_x1 = span["bbox"][0] + end_idx * char_width
-                            url_y0 = span["bbox"][1]
-                            url_y1 = span["bbox"][3]
-                            url_rect = fitz.Rect(url_x0, url_y0, url_x1, url_y1)
+                    # Create URL rectangles by combining character rectangles
+                    for match in matches:
+                        url = match.group()
+                        start_idx = match.start()
+                        end_idx = match.end()
 
-                            # Add the URL to our list of links to annotate
-                            all_links.append({"page": page, "rect": url_rect, "url": url, "type": "plain"})
+                        # Find all characters that are part of this URL
+                        url_rects = []
+                        for pos in char_positions:
+                            if start_idx <= pos["text_pos"] < end_idx:
+                                url_rects.append(pos["rect"])
 
-    # Third pass: annotate all found links
+                        # If we found characters for this URL, combine their rectangles
+                        if url_rects:
+                            combined_rect = url_rects[0]
+                            for rect in url_rects[1:]:
+                                combined_rect = combined_rect.include_rect(rect)
+                            all_links.append({
+                                "page": page,
+                                "rect": combined_rect,
+                                "url": url,
+                                "type": "plain"
+                            })
+
+    # Steps 3 & 4: Add red boxes around links and draw arrows to textboxes in the margin
     url_vertical_positions = {}  # Track vertical positions for URLs in the margin per page
 
-    for link_info in all_links:
-        page = link_info["page"]  # The page containing the link
-        page_num = page.number
-        rect = link_info["rect"]  # The rectangle coordinates of the link
-        url = link_info["url"]    # The URL text
+    # Create a dictionary to organize links by page
+    links_by_page = {}
+    for link in all_links:
+        page_num = link["page"].number
+        if page_num not in links_by_page:
+            links_by_page[page_num] = []
+        links_by_page[page_num].append(link)
+
+    # Process each page and its links
+    for page_num in links_by_page:
+        page = doc[page_num]  # Get the page
 
         # Initialize vertical position for this page if not already set
         if page_num not in url_vertical_positions:
-            url_vertical_positions[page_num] = 50  # Start 50 points from the top
+            url_vertical_positions[page_num] = 50
 
-        # Draw a red box around the link
-        page.draw_rect(rect, color=(1, 0, 0), width=1)  # RGB color: red
+        # Process all links on this page
+        for link_info in links_by_page[page_num]:
+            rect = link_info["rect"]
+            url = link_info["url"]
 
-        # Calculate position for the textbox in the right margin
-        original_width = page.rect.width - margin_width  # Original width before margin was added
-        textbox_x0 = original_width + 5  # 5 points padding from the edge
-        textbox_x1 = original_width + margin_width - 5  # 5 points padding from the edge
-        textbox_y0 = url_vertical_positions[page_num]
+            # Step 3: Draw a red box around the link
+            page.draw_rect(rect, color=(1, 0, 0), width=1)
 
-        # Calculate textbox height based on URL length (minimum 20 points)
-        textbox_height = max(20, 8 + (len(url) // 30) * 6)  # Adjust height for long URLs
-        textbox_y1 = textbox_y0 + textbox_height
+            # Step 4: Create textbox in the right margin
+            original_width = page.rect.width - margin_width
+            textbox_x0 = original_width + 10
+            textbox_x1 = original_width + margin_width - 10
+            textbox_y0 = url_vertical_positions[page_num]
 
-        # Create a rectangle for the textbox in the margin
-        textbox_rect = fitz.Rect(textbox_x0, textbox_y0, textbox_x1, textbox_y1)
+            # Calculate textbox height based on URL length
+            if len(url) > 50:
+                fontsize = 7
+                textbox_height = max(30, 10 + (len(url) // 20) * 8)
+            else:
+                fontsize = 9
+                textbox_height = max(20, 10 + (len(url) // 25) * 6)
 
-        # Insert a textbox with the full URL in the margin
-        page.insert_textbox(
-            textbox_rect,
-            url,
-            fontsize=8,
-            color=(0, 0, 0),  # Black text
-            align=0           # Left-aligned text
-        )
+            textbox_y1 = textbox_y0 + textbox_height
 
-        # Draw a rectangle around the textbox for better visibility
-        page.draw_rect(textbox_rect, color=(0.8, 0.8, 0.8), width=0.5)
+            # Create a rectangle for the textbox in the margin
+            textbox_rect = fitz.Rect(textbox_x0, textbox_y0, textbox_x1, textbox_y1)
 
-        # Draw an arrow from the link to the textbox in the margin
-        start = (rect.x1, (rect.y0 + rect.y1) / 2)  # Middle-right of the link
-        end = (textbox_x0, (textbox_y0 + textbox_y1) / 2)  # Middle-left of the textbox
-        page.draw_line(start, end, color=(1, 0, 0), width=0.5)  # Draw red arrow
-
-        # Update vertical position for next URL on this page
-        url_vertical_positions[page_num] = textbox_y1 + 8  # Add some spacing
-
-        # If we're running out of vertical space, create a new page
-        if url_vertical_positions[page_num] > page.rect.height - 50:
-            # Add a continuation marker
+            # Insert a textbox with the full URL in the margin
             page.insert_textbox(
-                fitz.Rect(textbox_x0, page.rect.height - 40, textbox_x1, page.rect.height - 20),
-                "(continued on next page)...",
-                fontsize=7,
+                textbox_rect,
+                url,
+                fontsize=fontsize,
                 color=(0, 0, 0),
-                align=1  # Centered text
+                align=0
+                # No fill parameter = transparent background
             )
 
-            # Create a new page with the same dimensions
-            new_page = doc.new_page(width=page.rect.width, height=page.rect.height)
-            new_page.set_mediabox(page.rect)
-            new_page.set_cropbox(page.rect)
+            # Draw a light gray rectangle around the textbox for better visibility
+            page.draw_rect(textbox_rect, color=(0.8, 0.8, 0.8), width=0.5)
 
-            # Reset vertical position for the new page
-            url_vertical_positions[page_num + 1] = 50
+            # Draw an arrow from the link to the textbox in the margin
+            start = (rect.x1, (rect.y0 + rect.y1) / 2)
+            end = (textbox_x0, (textbox_y0 + textbox_y1) / 2)
+            page.draw_line(start, end, color=(1, 0, 0), width=0.5)
 
-    # Save the annotated PDF to the output path
-    doc.save(output_pdf, garbage=4)  # Clean up unused objects
-    doc.close()  # Close the document
+            # Update vertical position for next URL on this page
+            url_vertical_positions[page_num] = textbox_y1 + 10
+
+            # If we're running out of vertical space, create a new page
+            if url_vertical_positions[page_num] > page.rect.height - 60:
+                # Add a continuation marker
+                continuation_rect = fitz.Rect(
+                    textbox_x0, page.rect.height - 50,
+                    textbox_x1, page.rect.height - 30
+                )
+                page.insert_textbox(
+                    continuation_rect,
+                    "(continued on next page)...",
+                    fontsize=8,
+                    color=(0, 0, 0),
+                    align=1
+                )
+
+                # Create a new page with the same dimensions
+                new_page = doc.new_page(width=page.rect.width, height=page.rect.height)
+                new_page.set_mediabox(page.rect)
+                new_page.set_cropbox(page.rect)
+                url_vertical_positions[page_num + 1] = 50
+
+    # Save the annotated PDF
+    doc.save(output_pdf, garbage=4)
+    doc.close()
+
 
 
 # Run the application if this script is executed directly
