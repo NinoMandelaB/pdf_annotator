@@ -1,8 +1,10 @@
-from flask import Flask, render_template, request, send_file, flash, redirect, url_for
+from flask import Flask, render_template, request, send_file, flash, redirect, url_for, make_response
 import fitz  # PyMuPDF
 import re
 import os
 import tempfile
+import zipfile
+import io
 from werkzeug.utils import secure_filename
 
 app = Flask(__name__)
@@ -11,46 +13,66 @@ app.secret_key = "your_secret_key_here"  # Change this!
 @app.route("/", methods=["GET", "POST"])
 def index():
     if request.method == "POST":
-        if "file" not in request.files:
-            flash("No file selected")
+        if "files" not in request.files:
+            flash("No files selected")
             return redirect(request.url)
-        file = request.files["file"]
-        if file.filename == "":
-            flash("No file selected")
+        files = request.files.getlist("files")
+        if not files or all(file.filename == "" for file in files):
+            flash("No files selected")
             return redirect(request.url)
-        if file and file.filename.endswith(".pdf"):
-            try:
-                # Read the uploaded file
-                input_pdf = file.read()
 
-                # Create a temporary input file
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp_in:
-                    temp_in.write(input_pdf)
-                    temp_in_path = temp_in.name
-
-                # Create a unique temporary output file
-                temp_out_fd, temp_out_path = tempfile.mkstemp(suffix=".pdf")
-                os.close(temp_out_fd)  # Close the file descriptor, we only need the path
-
-                # Process the PDF
-                annotate_pdf_with_links(temp_in_path, temp_out_path)
-
-                # Send the processed file to the user
-                return send_file(
-                    temp_out_path,
-                    as_attachment=True,
-                    download_name="annotated.pdf",
-                    mimetype="application/pdf"
-                )
-            except Exception as e:
-                flash(f"Error: {str(e)}")
+        # Validate all files are PDFs
+        for file in files:
+            if not file.filename.endswith(".pdf"):
+                flash(f"File {file.filename} is not a PDF")
                 return redirect(request.url)
-            finally:
-                # Clean up temporary files
-                if 'temp_in_path' in locals() and os.path.exists(temp_in_path):
-                    os.unlink(temp_in_path)
-                if 'temp_out_path' in locals() and os.path.exists(temp_out_path):
-                    os.unlink(temp_out_path)
+
+        try:
+            # Create a ZIP file in memory to store all annotated PDFs
+            zip_buffer = io.BytesIO()
+            with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
+                for file in files:
+                    # Read the uploaded file
+                    input_pdf = file.read()
+
+                    # Create temporary input file
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp_in:
+                        temp_in.write(input_pdf)
+                        temp_in_path = temp_in.name
+
+                    # Create a unique temporary output file
+                    temp_out_fd, temp_out_path = tempfile.mkstemp(suffix=".pdf")
+                    os.close(temp_out_fd)
+
+                    # Process the PDF
+                    annotate_pdf_with_links(temp_in_path, temp_out_path)
+
+                    # Get the original filename and prepend 'annotated_'
+                    original_filename = os.path.splitext(file.filename)[0]  # Remove extension
+                    zip_filename = f"annotated_{original_filename}.pdf"
+
+                    # Add the processed file to the ZIP with the new filename
+                    zip_file.write(temp_out_path, zip_filename)
+
+                    # Clean up temporary files
+                    if os.path.exists(temp_in_path):
+                        os.unlink(temp_in_path)
+                    if os.path.exists(temp_out_path):
+                        os.unlink(temp_out_path)
+
+            # Send the ZIP file to the user
+            zip_buffer.seek(0)
+            return send_file(
+                zip_buffer,
+                as_attachment=True,
+                download_name="annotated_files.zip",
+                mimetype="application/zip"
+            )
+
+        except Exception as e:
+            flash(f"Error: {str(e)}")
+            return redirect(request.url)
+
     return render_template("index.html")
 
 def annotate_pdf_with_links(input_pdf, output_pdf):
