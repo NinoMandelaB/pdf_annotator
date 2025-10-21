@@ -1,4 +1,4 @@
-# Import required libraries
+# Import required libraries.
 from flask import Flask, render_template, request, send_file, flash, redirect, url_for, make_response
 import fitz  # PyMuPDF library for PDF manipulation
 import re    # Regular expressions for pattern matching
