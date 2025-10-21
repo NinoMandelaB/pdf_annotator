@@ -48,6 +48,9 @@ The application is currently deployed on Railway.app. To deploy your own instanc
 2. Connect your GitHub repository
 3. Railway will automatically deploy the application
 
+### Azure Deployment:
+navigate to /terraform/AzureInstallation.md
+
 ## Project Structure
 
 ```
@@ -55,8 +58,12 @@ pdf-link-annotator/
 ├── app.py          # Main application logic
 ├── templates/
 │   └── index.html  # Web interface template
+├── terraform/      # Terraform configuration for Azure
+│   ├── main.tf
+│   ├── variables.tf
+│   ├── outputs.tf
+│   └── README.md   # Azure deployment instructions
 └── README.md       # This file
-```
 
 ## Configuration
 
