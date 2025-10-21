@@ -23,13 +23,14 @@ def index():
                 # Read the uploaded file
                 input_pdf = file.read()
 
-                # Create a temporary file for processing
+                # Create a temporary input file
                 with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as temp_in:
                     temp_in.write(input_pdf)
                     temp_in_path = temp_in.name
 
-                # Define output path
-                temp_out_path = temp_in_path.replace("temp", "annotated")
+                # Create a unique temporary output file
+                temp_out_fd, temp_out_path = tempfile.mkstemp(suffix=".pdf")
+                os.close(temp_out_fd)  # Close the file descriptor, we only need the path
 
                 # Process the PDF
                 annotate_pdf_with_links(temp_in_path, temp_out_path)
@@ -44,6 +45,12 @@ def index():
             except Exception as e:
                 flash(f"Error: {str(e)}")
                 return redirect(request.url)
+            finally:
+                # Clean up temporary files
+                if 'temp_in_path' in locals() and os.path.exists(temp_in_path):
+                    os.unlink(temp_in_path)
+                if 'temp_out_path' in locals() and os.path.exists(temp_out_path):
+                    os.unlink(temp_out_path)
     return render_template("index.html")
 
 def annotate_pdf_with_links(input_pdf, output_pdf):
@@ -53,9 +60,7 @@ def annotate_pdf_with_links(input_pdf, output_pdf):
         r'(?:https?://|www\.)[^\s]+)',                        # HTTP/HTTPS or www
         re.IGNORECASE
     )
-
     all_links = []
-
     for page in doc:
         # Collect explicit links
         links = page.get_links()
