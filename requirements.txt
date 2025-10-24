@@ -1,4 +1,4 @@
-Flask==2.0.1
-beautifulsoup4==4.10.0
-pymupdf==1.20.2
-weasyprint==53.3
+Flask==3.1.0
+beautifulsoup4==4.14.0
+PyMuPDF==1.26.5
+weasyprint==66.0
