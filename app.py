@@ -7,6 +7,7 @@ import tempfile
 import zipfile
 import io
 from bs4 import BeautifulSoup
+from weasyprint import HTML
 
 app = Flask(__name__)
 app.secret_key = "your_secret_key_here"  # Change this in production!
@@ -67,27 +68,32 @@ def index():
 
 def process_html_to_annotated_pdf(html_content, output_pdf_path):
     """Process HTML and create annotated PDF with links and tags highlighted."""
+    # Parse the HTML content
     soup = BeautifulSoup(html_content, 'html.parser')
 
-    # Create PDF document
-    doc = fitz.open()
-    page = doc.new_page(width=842, height=595)  # A4 size
+    # First, generate a PDF from the HTML using WeasyPrint
+    temp_pdf_path = tempfile.mktemp(suffix=".pdf")
+    HTML(string=str(soup)).write_pdf(temp_pdf_path)
+
+    # Open the generated PDF with PyMuPDF
+    doc = fitz.open(temp_pdf_path)
 
     # Add margin for annotations
     margin_width = 150
-    page.set_mediabox(fitz.Rect(0, 0, 842 + margin_width, 595))
-    page.set_cropbox(fitz.Rect(0, 0, 842 + margin_width, 595))
+    for page in doc:
+        page_rect = page.rect
+        original_width = page_rect.width
+        original_height = page_rect.height
 
-    # Insert HTML content as text
-    page.insert_textbox(
-        fitz.Rect(50, 50, 842 - 50, 595 - 50),
-        soup.get_text(),
-        fontsize=12,
-        color=(0, 0, 0),
-        align=0
-    )
+        # Expand the page dimensions to include the margin
+        new_width = original_width + margin_width
+        new_rect = fitz.Rect(0, 0, new_width, original_height)
 
-    # Find all links and tags
+        # Set both media box and crop box to the new dimensions
+        page.set_mediabox(new_rect)
+        page.set_cropbox(new_rect)
+
+    # Find all links and tags in the HTML
     all_elements = []
 
     # Find links
@@ -99,6 +105,15 @@ def process_html_to_annotated_pdf(html_content, output_pdf_path):
                 'url': a_tag['href']
             })
 
+    # Find template tags (like {{customText[...]}})
+    template_pattern = re.compile(r'\{\{.*?\}\}')
+    for match in template_pattern.finditer(str(soup)):
+        template_tag = match.group()
+        all_elements.append({
+            'type': 'template',
+            'text': template_tag
+        })
+
     # Find other tags (customize as needed)
     for tag in soup.find_all():
         if tag.name not in ['a', 'html', 'head', 'body', 'meta', 'script', 'style']:
@@ -109,55 +124,83 @@ def process_html_to_annotated_pdf(html_content, output_pdf_path):
             })
 
     # Add annotations to margin
-    y_pos = 50
-    for element in all_elements:
-        textbox_x0 = 842 + 10
-        textbox_x1 = 842 + margin_width - 10
-        textbox_y0 = y_pos
+    url_vertical_positions = {}  # Track vertical positions for URLs in the margin per page
 
-        if element['type'] == 'link':
-            text = f"Link: {element['text']} → {element['url']}"
-        else:
-            text = f"Tag: <{element['tag_name']}>: {element['text']}"
+    # Process each page
+    for page_num in range(len(doc)):
+        page = doc[page_num]
 
-        # Adjust font size based on text length
-        fontsize = 8 if len(text) > 50 else 10
-        textbox_height = max(20, 10 + (len(text) // 25) * 5)
-        textbox_y1 = textbox_y0 + textbox_height
+        # Initialize vertical position for this page if not already set
+        if page_num not in url_vertical_positions:
+            url_vertical_positions[page_num] = 50
 
-        # Create annotation textbox
-        textbox_rect = fitz.Rect(textbox_x0, textbox_y0, textbox_x1, textbox_y1)
-        page.insert_textbox(
-            textbox_rect,
-            text,
-            fontsize=fontsize,
-            color=(0, 0, 0),
-            align=0
-        )
+        # Process all elements and add annotations to the margin
+        for element in all_elements:
+            # Calculate position for the textbox in the right margin
+            original_width = page.rect.width - margin_width
+            textbox_x0 = original_width + 10
+            textbox_x1 = original_width + margin_width - 10
+            textbox_y0 = url_vertical_positions[page_num]
 
-        # Add border to annotation
-        page.draw_rect(textbox_rect, color=(0.8, 0.8, 0.8), width=0.5)
+            # Create the annotation text
+            if element['type'] == 'link':
+                text = f"Link: {element['text']} → {element['url']}"
+            elif element['type'] == 'template':
+                text = f"Template: {element['text']}"
+            else:
+                text = f"Tag: <{element['tag_name']}>: {element['text']}"
 
-        y_pos = textbox_y1 + 10
+            # Adjust font size based on text length
+            fontsize = 7 if len(text) > 60 else 9
+            textbox_height = max(20, 10 + (len(text) // 25) * 5)
+            textbox_y1 = textbox_y0 + textbox_height
 
-        # Create new page if needed
-        if y_pos > 595 - 60:
+            # Create a rectangle for the textbox in the margin
+            textbox_rect = fitz.Rect(textbox_x0, textbox_y0, textbox_x1, textbox_y1)
+
+            # Insert a textbox with the element info in the margin
             page.insert_textbox(
-                fitz.Rect(textbox_x0, 595 - 50, textbox_x1, 595 - 30),
-                "(continued on next page)...",
-                fontsize=8,
-                color=(0.5, 0.5, 0.5),
-                align=1
+                textbox_rect,
+                text,
+                fontsize=fontsize,
+                color=(0, 0, 0),
+                align=0
             )
 
-            page = doc.new_page(width=842 + margin_width, height=595)
-            page.set_mediabox(fitz.Rect(0, 0, 842 + margin_width, 595))
-            page.set_cropbox(fitz.Rect(0, 0, 842 + margin_width, 595))
-            y_pos = 50
+            # Draw a light gray rectangle around the textbox for better visibility
+            page.draw_rect(textbox_rect, color=(0.8, 0.8, 0.8), width=0.5)
 
-    # Save PDF
-    doc.save(output_pdf_path)
+            # Update vertical position for next element on this page
+            url_vertical_positions[page_num] = textbox_y1 + 8
+
+            # If we're running out of vertical space, create a new page
+            if url_vertical_positions[page_num] > page.rect.height - 60:
+                # Add a continuation marker
+                continuation_rect = fitz.Rect(
+                    textbox_x0, page.rect.height - 50,
+                    textbox_x1, page.rect.height - 30
+                )
+                page.insert_textbox(
+                    continuation_rect,
+                    "(continued on next page)...",
+                    fontsize=8,
+                    color=(0.5, 0.5, 0.5),
+                    align=1
+                )
+
+                # Create a new page with the same dimensions
+                new_page = doc.new_page(width=page.rect.width, height=page.rect.height)
+                new_page.set_mediabox(page.rect)
+                new_page.set_cropbox(page.rect)
+                url_vertical_positions[len(doc) - 1] = 50  # Update for the new page
+
+    # Save the annotated PDF
+    doc.saveIncr()
     doc.close()
+
+    # Clean up the temporary PDF
+    if os.path.exists(temp_pdf_path):
+        os.unlink(temp_pdf_path)
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
